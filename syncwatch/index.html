@@ -4,7 +4,27 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <title>SyncWatch</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!--
+    Content-Security-Policy: restricts where scripts, data and frames may come from.
+    'unsafe-inline'/'unsafe-eval' are unavoidable here because Babel and the Tailwind
+    Play CDN compile in the browser; for a production build, precompile Tailwind to a
+    static .css and drop in-browser Babel to remove both and tighten this further.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com https://www.gstatic.com https://cdn.tailwindcss.com https://www.youtube.com https://s.ytimg.com;
+    style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com;
+    img-src 'self' data: https://i.ytimg.com https://*.ytimg.com;
+    frame-src https://www.youtube.com https://www.youtube-nocookie.com;
+    connect-src 'self' https://www.googleapis.com https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://*.firebasedatabase.app wss://*.firebasedatabase.app;
+    base-uri 'self';
+    object-src 'none';
+    form-action 'none';
+  " />
+
+  <!-- Tailwind Play CDN, version-pinned (dev/personal use; compile to static CSS for production) -->
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0a0a0a; color: #f1f1f1; font-family: system-ui, -apple-system, sans-serif; min-height: 100vh; }
@@ -30,16 +50,29 @@
 <body>
   <div id="root"></div>
 
-  <!-- React + ReactDOM -->
-  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <!-- React + ReactDOM (production builds, exact versions, Subresource Integrity pinned) -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"
+          integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z"
+          crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"
+          integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1"
+          crossorigin="anonymous"></script>
 
   <!-- Firebase compat SDK (no ES module imports needed) -->
-  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"
+          integrity="sha384-AQ3POAMqIhwS81FrUH95ekxqBZHeP5tG2JfEL3+7GuTtfRLWnrRh32UxwzM+//A9"
+          crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"
+          integrity="sha384-1/m+A1jVWbD3yiK3/vtFvm1+LjK1WLpSoDY+Kaxppwn/yP9BVSgdHTNQVOjrzUO5"
+          crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"
+          integrity="sha384-TnlRYaR4JYz/lpaGuaiU61PjNberSA4vjLjtF+oRC/IkohkJqnWxw5EmDSOt1vA1"
+          crossorigin="anonymous"></script>
 
-  <!-- Babel standalone (JSX only) -->
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Babel standalone (JSX only) — exact version + SRI -->
+  <script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"
+          integrity="sha384-x/ilTFv/u/eu6YSmkFDZl5V5Mm/pkxxcVv2cVJOrr1J0rvILhMvRBCy6yA75wYBj"
+          crossorigin="anonymous"></script>
 
   <!-- User config: sets window.FIREBASE_CONFIG and window.YOUTUBE_API_KEY -->
   <script src="firebase-config.js"></script>
@@ -49,19 +82,40 @@
     const { useState, useEffect, useRef, useCallback } = React;
 
     // ── Firebase init (lazy — won't block render if config is missing) ──
-    let db = null;
-    function getDb() {
-      if (db) return db;
+    // Anonymous Auth gives every client a Firebase token so the database
+    // rules can require `auth != null`, attribute writes, and let the
+    // Display claim room ownership. Enable it in:
+    //   Firebase Console → Authentication → Sign-in method → Anonymous.
+    let app = null, db = null, auth = null, authReady = null;
+    function initFirebase() {
+      if (app) return;
+      if (!window.FIREBASE_CONFIG || window.FIREBASE_CONFIG.apiKey === "YOUR_API_KEY") return;
       try {
-        if (!window.FIREBASE_CONFIG || window.FIREBASE_CONFIG.apiKey === "YOUR_API_KEY") return null;
-        const existing = firebase.apps.length ? firebase.app() : firebase.initializeApp(window.FIREBASE_CONFIG);
-        db = existing.database();
+        app  = firebase.apps.length ? firebase.app() : firebase.initializeApp(window.FIREBASE_CONFIG);
+        db   = app.database();
+        auth = app.auth();
+        authReady = new Promise((resolve, reject) => {
+          auth.onAuthStateChanged(u => { if (u) resolve(u); });
+          auth.signInAnonymously().catch(reject);
+        });
       } catch(e) { console.error("Firebase init failed:", e); }
-      return db;
     }
+    function getDb()        { initFirebase(); return db; }
+    function getAuthReady() { initFirebase(); return authReady; }
 
     // ── Helpers ────────────────────────────────────────────────
-    const genCode = () => Math.random().toString(36).slice(2,8).toUpperCase();
+    // Cryptographically-random, unbiased, always exactly 6 chars.
+    // (Math.random() was predictable and could occasionally yield <6 chars.)
+    const genCode = () => {
+      const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"; // 36 symbols
+      const buf = new Uint8Array(1);
+      let out = "";
+      while (out.length < 6) {
+        crypto.getRandomValues(buf);
+        if (buf[0] < 252) out += chars[buf[0] % 36]; // 252 = 7×36 → reject the rest to avoid modulo bias
+      }
+      return out;
+    };
     const fmtTime = s => {
       if (!s || isNaN(s)) return "0:00";
       return `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,"0")}`;
@@ -153,25 +207,39 @@
         const cmdRef    = db.ref(`rooms/${roomCode}/command`);
         const ctrlRef   = db.ref(`rooms/${roomCode}/controllerOnline`);
         const dispRef   = db.ref(`rooms/${roomCode}/displayOnline`);
+        const ownerRef  = db.ref(`rooms/${roomCode}/owner`);
 
-        dispRef.set(true);
-        dispRef.onDisconnect().remove();
+        let cancelled = false;
+        getAuthReady().then(user => {
+          if (cancelled) return;
+          // Claim ownership first so the rules permit the presence write.
+          ownerRef.set(user.uid).then(() => {
+            if (cancelled) return;
+            dispRef.set(true);
+            dispRef.onDisconnect().remove();
+            cmdRef.onDisconnect().remove();
+          }).catch(e => console.error("Could not claim room:", e));
 
-        ctrlRef.on("value", snap => setStatus(snap.val() ? "connected" : "waiting"));
+          ctrlRef.on("value", snap => setStatus(snap.val() ? "connected" : "waiting"));
 
-        cmdRef.on("value", snap => {
-          const cmd = snap.val();
-          if (!cmd || !playerReady.current) return;
-          if (cmd.sentAt === lastSentAt.current) return;
-          lastSentAt.current = cmd.sentAt;
-          const p = playerRef.current;
-          if (cmd.action === "load")  { p.loadVideoById(cmd.videoId); setVideoTitle(cmd.title || ""); }
-          if (cmd.action === "play")  p.playVideo();
-          if (cmd.action === "pause") p.pauseVideo();
-          if (cmd.action === "seek")  p.seekTo(cmd.timestamp, true);
-        });
+          cmdRef.on("value", snap => {
+            const cmd = snap.val();
+            if (!cmd || !playerReady.current) return;
+            if (cmd.sentAt === lastSentAt.current) return;
+            lastSentAt.current = cmd.sentAt;
+            const p = playerRef.current;
+            // Defensive: the rules already validate these, but never trust the wire.
+            if (cmd.action === "load" && typeof cmd.videoId === "string" && /^[A-Za-z0-9_-]{1,20}$/.test(cmd.videoId)) {
+              p.loadVideoById(cmd.videoId);
+              setVideoTitle(typeof cmd.title === "string" ? cmd.title.slice(0, 200) : "");
+            }
+            if (cmd.action === "play")  p.playVideo();
+            if (cmd.action === "pause") p.pauseVideo();
+            if (cmd.action === "seek" && typeof cmd.timestamp === "number") p.seekTo(cmd.timestamp, true);
+          });
+        }).catch(e => console.error("Auth failed:", e));
 
-        return () => { cmdRef.off(); ctrlRef.off(); dispRef.remove(); };
+        return () => { cancelled = true; cmdRef.off(); ctrlRef.off(); dispRef.remove(); };
       }, [roomCode]);
 
       function newCode() { setRoomCode(genCode()); setStatus("waiting"); setVideoTitle(""); }
@@ -234,17 +302,21 @@
         if (!db || !roomCode) return;
         const dispRef = db.ref(`rooms/${roomCode}/displayOnline`);
         const ctrlRef = db.ref(`rooms/${roomCode}/controllerOnline`);
-        ctrlRef.set(true);
-        ctrlRef.onDisconnect().remove();
         setStatus("waiting");
-        dispRef.on("value", snap => setStatus(snap.val() ? "connected" : "waiting"));
-        return () => { dispRef.off(); ctrlRef.remove(); setStatus("disconnected"); };
+        let cancelled = false;
+        getAuthReady().then(() => {
+          if (cancelled) return;
+          ctrlRef.set(true);
+          ctrlRef.onDisconnect().remove();
+          dispRef.on("value", snap => setStatus(snap.val() ? "connected" : "waiting"));
+        }).catch(e => console.error("Auth failed:", e));
+        return () => { cancelled = true; dispRef.off(); ctrlRef.remove(); setStatus("disconnected"); };
       }, [roomCode]);
 
       function sendCmd(cmd) {
         const db = getDb();
         if (!db || !roomCode) return;
-        db.ref(`rooms/${roomCode}/command`).set({ ...cmd, sentAt: Date.now() });
+        getAuthReady().then(() => db.ref(`rooms/${roomCode}/command`).set({ ...cmd, sentAt: Date.now() }));
       }
 
       function loadVideo(v) {
@@ -308,7 +380,7 @@
           <div className="w-full max-w-xs flex flex-col gap-3">
             <input
               value={roomInput}
-              onChange={e => setRoomInput(e.target.value.toUpperCase().slice(0,6))}
+              onChange={e => setRoomInput(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,6))}
               onKeyDown={e => e.key === "Enter" && connect()}
               placeholder="XXXXXX"
               className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-4 py-4 text-center text-2xl font-mono tracking-[0.4em] text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-400"
