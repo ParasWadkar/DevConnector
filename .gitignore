@@ -1,0 +1,23 @@
+# ── Secrets / local config — never commit real keys ─────────────
+.env
+.env.local
+.env.*.local
+# The real Firebase/YouTube config holds live keys once filled in.
+# Keep the committed template (firebase-config.example.js) only.
+**/firebase-config.js
+!**/firebase-config.example.js
+
+# ── Firebase tooling ────────────────────────────────────────────
+.firebase/
+firebase-debug.log
+database-debug.log
+ui-debug.log
+
+# ── Node ────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+
+# ── OS / editor cruft ───────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp

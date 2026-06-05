@@ -1,6 +1,11 @@
 // ─────────────────────────────────────────────────────────────
-//  FILL IN YOUR FIREBASE PROJECT VALUES HERE
-//  Get them from: Firebase Console → Project Settings → Your apps
+//  TEMPLATE — copy this file to "firebase-config.js" and fill in
+//  your real values. firebase-config.js is git-ignored so your
+//  keys are never committed.
+//      cp firebase-config.example.js firebase-config.js
+//
+//  Get the Firebase values from:
+//      Firebase Console → Project Settings → Your apps
 // ─────────────────────────────────────────────────────────────
 window.FIREBASE_CONFIG = {
   apiKey:            "YOUR_API_KEY",
