@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>SyncWatch</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0a0a; color: #f1f1f1; font-family: system-ui, -apple-system, sans-serif; min-height: 100vh; }
+    #root { min-height: 100vh; }
+    #yt-player, #yt-player iframe { width: 100% !important; height: 100% !important; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #1a1a1a; }
+    ::-webkit-scrollbar-thumb { background: #444; border-radius: 2px; }
+    input[type=range] {
+      -webkit-appearance: none; appearance: none;
+      height: 4px; border-radius: 2px; background: #333; outline: none; cursor: pointer;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 16px; height: 16px;
+      border-radius: 50%; background: #ef4444; cursor: pointer;
+    }
+    .seek-bar { background: linear-gradient(to right, #ef4444 var(--pct,0%), #333 var(--pct,0%)); }
+    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:.3} }
+    .pulse { animation: pulse-dot 1.5s ease-in-out infinite; }
+    .line-clamp-2 { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- React + ReactDOM -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+
+  <!-- Firebase compat SDK (no ES module imports needed) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+
+  <!-- Babel standalone (JSX only) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- User config: sets window.FIREBASE_CONFIG and window.YOUTUBE_API_KEY -->
+  <script src="firebase-config.js"></script>
+
+  <!-- App (JSX via Babel) -->
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // ── Firebase init (lazy — won't block render if config is missing) ──
+    let db = null;
+    function getDb() {
+      if (db) return db;
+      try {
+        if (!window.FIREBASE_CONFIG || window.FIREBASE_CONFIG.apiKey === "YOUR_API_KEY") return null;
+        const existing = firebase.apps.length ? firebase.app() : firebase.initializeApp(window.FIREBASE_CONFIG);
+        db = existing.database();
+      } catch(e) { console.error("Firebase init failed:", e); }
+      return db;
+    }
+
+    // ── Helpers ────────────────────────────────────────────────
+    const genCode = () => Math.random().toString(36).slice(2,8).toUpperCase();
+    const fmtTime = s => {
+      if (!s || isNaN(s)) return "0:00";
+      return `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,"0")}`;
+    };
+
+    // ── Status dot ─────────────────────────────────────────────
+    function StatusDot({ status }) {
+      const colors  = { connected:"bg-green-500", waiting:"bg-yellow-500 pulse", disconnected:"bg-red-500" };
+      const labels  = { connected:"Connected",    waiting:"Waiting…",            disconnected:"Disconnected" };
+      return (
+        <span className="flex items-center gap-2 text-sm text-gray-400">
+          <span className={`inline-block w-2 h-2 rounded-full ${colors[status]||"bg-gray-500"}`} />
+          {labels[status]||status}
+        </span>
+      );
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  LANDING PAGE
+    // ══════════════════════════════════════════════════════════
+    function Landing({ onMode }) {
+      return (
+        <div className="flex flex-col items-center justify-center min-h-screen px-6 gap-10">
+          <div className="text-center">
+            <div className="text-5xl mb-3">📺</div>
+            <h1 className="text-4xl font-bold tracking-tight text-white">SyncWatch</h1>
+            <p className="mt-2 text-gray-400 text-sm">Remote YouTube control — no installs needed</p>
+          </div>
+
+          <div className="flex flex-col gap-4 w-full max-w-xs">
+            <button
+              onClick={() => onMode("display")}
+              className="flex flex-col items-center gap-2 bg-zinc-900 border border-zinc-700 hover:border-zinc-500 rounded-2xl p-6 transition-colors"
+            >
+              <span className="text-3xl">🖥️</span>
+              <span className="font-semibold text-white text-lg">Display</span>
+              <span className="text-xs text-gray-400 text-center">Open on the iMac — fullscreen video player</span>
+            </button>
+
+            <button
+              onClick={() => onMode("controller")}
+              className="flex flex-col items-center gap-2 bg-zinc-900 border border-zinc-700 hover:border-zinc-500 rounded-2xl p-6 transition-colors"
+            >
+              <span className="text-3xl">📱</span>
+              <span className="font-semibold text-white text-lg">Controller</span>
+              <span className="text-xs text-gray-400 text-center">Open on your phone — search &amp; control</span>
+            </button>
+          </div>
+
+          <p className="text-xs text-zinc-600 text-center max-w-xs">
+            Both pages sync via a private 6-character room code.<br/>No account required.
+          </p>
+        </div>
+      );
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  DISPLAY PAGE
+    // ══════════════════════════════════════════════════════════
+    function DisplayPage({ onBack }) {
+      const [roomCode, setRoomCode]   = useState(genCode);
+      const [status, setStatus]       = useState("waiting");
+      const [videoTitle, setVideoTitle] = useState("");
+      const playerRef   = useRef(null);
+      const playerReady = useRef(false);
+      const lastSentAt  = useRef(null);
+
+      // Load YouTube IFrame API
+      useEffect(() => {
+        const setup = () => {
+          playerRef.current = new window.YT.Player("yt-player", {
+            videoId: "",
+            playerVars: { autoplay: 1, controls: 0, rel: 0, modestbranding: 1, iv_load_policy: 3 },
+            events: { onReady: () => { playerReady.current = true; } },
+          });
+        };
+        if (window.YT && window.YT.Player) { setup(); return; }
+        const tag = document.createElement("script");
+        tag.src = "https://www.youtube.com/iframe_api";
+        document.head.appendChild(tag);
+        window.onYouTubeIframeAPIReady = setup;
+        return () => { window.onYouTubeIframeAPIReady = null; };
+      }, []);
+
+      // Firebase listeners
+      useEffect(() => {
+        const db = getDb();
+        if (!db) return;
+        const cmdRef    = db.ref(`rooms/${roomCode}/command`);
+        const ctrlRef   = db.ref(`rooms/${roomCode}/controllerOnline`);
+        const dispRef   = db.ref(`rooms/${roomCode}/displayOnline`);
+
+        dispRef.set(true);
+        dispRef.onDisconnect().remove();
+
+        ctrlRef.on("value", snap => setStatus(snap.val() ? "connected" : "waiting"));
+
+        cmdRef.on("value", snap => {
+          const cmd = snap.val();
+          if (!cmd || !playerReady.current) return;
+          if (cmd.sentAt === lastSentAt.current) return;
+          lastSentAt.current = cmd.sentAt;
+          const p = playerRef.current;
+          if (cmd.action === "load")  { p.loadVideoById(cmd.videoId); setVideoTitle(cmd.title || ""); }
+          if (cmd.action === "play")  p.playVideo();
+          if (cmd.action === "pause") p.pauseVideo();
+          if (cmd.action === "seek")  p.seekTo(cmd.timestamp, true);
+        });
+
+        return () => { cmdRef.off(); ctrlRef.off(); dispRef.remove(); };
+      }, [roomCode]);
+
+      function newCode() { setRoomCode(genCode()); setStatus("waiting"); setVideoTitle(""); }
+
+      return (
+        <div className="relative w-screen h-screen bg-black overflow-hidden">
+          <div id="yt-player" className="absolute inset-0" />
+
+          {status !== "connected" && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 gap-6 z-10">
+              <h1 className="text-white text-3xl font-bold tracking-widest">SyncWatch</h1>
+              <p className="text-gray-400 text-sm">Enter this code on the Controller:</p>
+              <div className="bg-zinc-900 border border-zinc-700 rounded-2xl px-10 py-6 text-center">
+                <p className="text-xs text-gray-500 uppercase tracking-widest mb-2">Room Code</p>
+                <p className="text-5xl font-mono font-bold text-white tracking-[0.35em]">{roomCode}</p>
+              </div>
+              <StatusDot status={status} />
+              <button onClick={newCode} className="text-xs text-zinc-500 hover:text-zinc-300 underline mt-1">
+                Generate new code
+              </button>
+              <button onClick={onBack} className="text-xs text-zinc-600 hover:text-zinc-400 mt-4">← Back</button>
+            </div>
+          )}
+
+          {status === "connected" && (
+            <div className="absolute top-4 right-4 z-20 flex flex-col items-end gap-1">
+              <StatusDot status="connected" />
+              {videoTitle && <p className="text-xs text-gray-400 max-w-xs text-right truncate">{videoTitle}</p>}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  CONTROLLER PAGE
+    // ══════════════════════════════════════════════════════════
+    function ControllerPage({ onBack }) {
+      const [roomInput, setRoomInput]     = useState("");
+      const [roomCode, setRoomCode]       = useState("");
+      const [status, setStatus]           = useState("disconnected");
+      const [query, setQuery]             = useState("");
+      const [results, setResults]         = useState([]);
+      const [searching, setSearching]     = useState(false);
+      const [currentVideo, setCurrentVideo] = useState(null);
+      const [playing, setPlaying]         = useState(false);
+      const [duration, setDuration]       = useState(0);
+      const [position, setPosition]       = useState(0);
+      const tickRef = useRef(null);
+
+      function connect() {
+        const code = roomInput.trim().toUpperCase();
+        if (code.length !== 6) return;
+        setRoomCode(code);
+      }
+
+      // Firebase: presence + display watcher
+      useEffect(() => {
+        const db = getDb();
+        if (!db || !roomCode) return;
+        const dispRef = db.ref(`rooms/${roomCode}/displayOnline`);
+        const ctrlRef = db.ref(`rooms/${roomCode}/controllerOnline`);
+        ctrlRef.set(true);
+        ctrlRef.onDisconnect().remove();
+        setStatus("waiting");
+        dispRef.on("value", snap => setStatus(snap.val() ? "connected" : "waiting"));
+        return () => { dispRef.off(); ctrlRef.remove(); setStatus("disconnected"); };
+      }, [roomCode]);
+
+      function sendCmd(cmd) {
+        const db = getDb();
+        if (!db || !roomCode) return;
+        db.ref(`rooms/${roomCode}/command`).set({ ...cmd, sentAt: Date.now() });
+      }
+
+      function loadVideo(v) {
+        setCurrentVideo(v); setPlaying(true); setPosition(0); setDuration(0);
+        sendCmd({ action: "load", videoId: v.id, title: v.title });
+        setResults([]); setQuery("");
+        startTick();
+      }
+
+      function togglePlay() {
+        const next = !playing; setPlaying(next);
+        sendCmd({ action: next ? "play" : "pause" });
+        next ? startTick() : stopTick();
+      }
+
+      function skip(delta) {
+        const next = Math.max(0, Math.min(position + delta, duration || Infinity));
+        setPosition(next);
+        sendCmd({ action: "seek", timestamp: next });
+      }
+
+      function startTick() {
+        stopTick();
+        tickRef.current = setInterval(() => setPosition(p => p + 1), 1000);
+      }
+      function stopTick() { clearInterval(tickRef.current); }
+      useEffect(() => () => stopTick(), []);
+
+      // Update seek bar CSS gradient
+      const pct = duration > 0 ? Math.min((position / duration) * 100, 100) : 0;
+
+      async function doSearch(e) {
+        e.preventDefault();
+        if (!query.trim() || !window.YOUTUBE_API_KEY || window.YOUTUBE_API_KEY === "YOUR_YOUTUBE_DATA_API_KEY") {
+          alert("Add your YouTube Data API key to firebase-config.js first.");
+          return;
+        }
+        setSearching(true); setResults([]);
+        try {
+          const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=10&q=${encodeURIComponent(query)}&key=${window.YOUTUBE_API_KEY}`;
+          const res  = await fetch(url);
+          const data = await res.json();
+          if (data.error) throw new Error(data.error.message);
+          setResults((data.items || []).map(i => ({
+            id: i.id.videoId,
+            title: i.snippet.title,
+            thumb: i.snippet.thumbnails.medium.url,
+            channel: i.snippet.channelTitle,
+          })));
+        } catch(err) { alert("Search failed: " + err.message); }
+        finally { setSearching(false); }
+      }
+
+      // ── Room code entry screen ───────────────────────────────
+      if (!roomCode) return (
+        <div className="flex flex-col items-center justify-center min-h-screen px-6 gap-8">
+          <div className="text-center">
+            <h1 className="text-2xl font-bold text-white">Controller</h1>
+            <p className="text-gray-400 text-sm mt-1">Enter the room code shown on the iMac</p>
+          </div>
+          <div className="w-full max-w-xs flex flex-col gap-3">
+            <input
+              value={roomInput}
+              onChange={e => setRoomInput(e.target.value.toUpperCase().slice(0,6))}
+              onKeyDown={e => e.key === "Enter" && connect()}
+              placeholder="XXXXXX"
+              className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-4 py-4 text-center text-2xl font-mono tracking-[0.4em] text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-400"
+              maxLength={6} autoComplete="off"
+            />
+            <button
+              onClick={connect}
+              disabled={roomInput.length !== 6}
+              className="bg-red-600 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-xl py-3 transition-colors"
+            >
+              Connect
+            </button>
+          </div>
+          <button onClick={onBack} className="text-xs text-zinc-600 hover:text-zinc-400">← Back</button>
+        </div>
+      );
+
+      // ── Main controller UI ───────────────────────────────────
+      return (
+        <div className="flex flex-col min-h-screen max-w-md mx-auto px-4 pt-4 pb-6 gap-4">
+          {/* Header */}
+          <div className="flex items-center justify-between">
+            <button onClick={onBack} className="text-xs text-zinc-600 hover:text-zinc-400">← Back</button>
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-mono text-zinc-500 border border-zinc-700 rounded px-2 py-0.5">{roomCode}</span>
+              <StatusDot status={status} />
+            </div>
+          </div>
+
+          {/* Now playing */}
+          {currentVideo && (
+            <div className="bg-zinc-900 rounded-2xl p-3 flex gap-3 items-center">
+              <img src={currentVideo.thumb} alt="" className="w-20 h-14 object-cover rounded-lg shrink-0" />
+              <div className="min-w-0">
+                <p className="text-xs text-gray-500 mb-0.5">Now Playing</p>
+                <p className="text-sm font-medium text-white leading-tight line-clamp-2">{currentVideo.title}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Playback controls */}
+          {currentVideo && (
+            <div className="bg-zinc-900 rounded-2xl p-4 flex flex-col gap-4">
+              {/* Duration input (shown once until set) */}
+              {duration === 0 && (
+                <div className="flex items-center justify-center gap-2">
+                  <span className="text-xs text-zinc-500">Set video length (mins):</span>
+                  <input
+                    type="number" min={1} max={300} placeholder="e.g. 4"
+                    className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-white text-center focus:outline-none"
+                    onChange={e => { if(e.target.value) setDuration(Number(e.target.value)*60); }}
+                  />
+                </div>
+              )}
+
+              {/* Seek bar */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-zinc-500 w-10 text-right tabular-nums">{fmtTime(position)}</span>
+                <input
+                  type="range" className="seek-bar flex-1"
+                  style={{"--pct": `${pct}%`}}
+                  min={0} max={duration||100} value={position}
+                  onChange={e => setPosition(Number(e.target.value))}
+                  onMouseUp={e => sendCmd({ action:"seek", timestamp: Number(e.target.value) })}
+                  onTouchEnd={e => sendCmd({ action:"seek", timestamp: Number(e.target.value) })}
+                />
+                <span className="text-xs text-zinc-500 w-10 tabular-nums">{fmtTime(duration)}</span>
+              </div>
+
+              {/* Buttons */}
+              <div className="flex items-center justify-center gap-8">
+                <button onClick={() => skip(-10)} className="flex flex-col items-center gap-0.5 text-gray-300 hover:text-white active:scale-95 transition-transform">
+                  <span className="text-2xl">⏪</span>
+                  <span className="text-xs text-zinc-500">−10s</span>
+                </button>
+                <button onClick={togglePlay}
+                  className="w-16 h-16 rounded-full bg-red-600 hover:bg-red-500 active:scale-95 flex items-center justify-center text-2xl transition-all shadow-lg shadow-red-900/40"
+                >
+                  {playing ? "⏸" : "▶️"}
+                </button>
+                <button onClick={() => skip(10)} className="flex flex-col items-center gap-0.5 text-gray-300 hover:text-white active:scale-95 transition-transform">
+                  <span className="text-2xl">⏩</span>
+                  <span className="text-xs text-zinc-500">+10s</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Search bar */}
+          <form onSubmit={doSearch} className="flex gap-2">
+            <input
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search YouTube…"
+              className="flex-1 bg-zinc-900 border border-zinc-700 rounded-xl px-4 py-3 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
+            />
+            <button type="submit" disabled={searching}
+              className="bg-red-600 hover:bg-red-500 disabled:opacity-40 rounded-xl px-5 text-white text-sm font-semibold transition-colors"
+            >
+              {searching ? "…" : "Go"}
+            </button>
+          </form>
+
+          {/* Search results */}
+          {results.length > 0 && (
+            <div className="flex flex-col gap-2 overflow-y-auto" style={{maxHeight:"55vh"}}>
+              {results.map(v => (
+                <button key={v.id} onClick={() => loadVideo(v)}
+                  className="flex gap-3 bg-zinc-900 hover:bg-zinc-800 active:bg-zinc-700 rounded-xl p-3 text-left transition-colors"
+                >
+                  <img src={v.thumb} alt="" className="w-24 h-16 object-cover rounded-lg shrink-0" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-white leading-tight line-clamp-2">{v.title}</p>
+                    <p className="text-xs text-zinc-500 mt-1">{v.channel}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Empty state */}
+          {results.length === 0 && !searching && !currentVideo && (
+            <div className="flex-1 flex flex-col items-center justify-center gap-2 py-12">
+              <span className="text-4xl">🔍</span>
+              <p className="text-zinc-600 text-sm">Search for a video to get started</p>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  ROOT APP — simple hash-based routing
+    // ══════════════════════════════════════════════════════════
+    function App() {
+      const [page, setPage] = useState("landing");
+      if (page === "display")    return <DisplayPage    onBack={() => setPage("landing")} />;
+      if (page === "controller") return <ControllerPage onBack={() => setPage("landing")} />;
+      return <Landing onMode={setPage} />;
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
